@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">FocusLock</string>
+    <string name="accessibility_service_description">FocusLock uses Accessibility Services to detect the currently active app and show a blocking overlay when a disallowed app is opened during a focus session.</string>
+</resources>
