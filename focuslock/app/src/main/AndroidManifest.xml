@@ -3,13 +3,24 @@
     xmlns:tools="http://schemas.android.com/tools"
     package="com.focuslock.app">
 
+    <!-- Calendar -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
+
+    <!-- Overlay -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <!-- Usage stats (for detecting foreground app during focus) -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
+
+    <!-- Foreground service -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- Notifications (API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Enumerate installed apps for the allowed-apps settings screen -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
@@ -35,12 +46,13 @@
             android:name=".SettingsActivity"
             android:exported="false" />
 
+        <!-- BlockerActivity is now only used as a fallback trampoline; kept minimal -->
         <activity
             android:name=".BlockerActivity"
             android:exported="false"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
-            android:theme="@style/Theme.FocusLock.Transparent" />
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name=".FocusService"
@@ -51,6 +63,7 @@
                 android:value="focuslock_timer" />
         </service>
 
+        <!-- Accessibility service for real-time app detection -->
         <service
             android:name=".FocusAccessibilityService"
             android:exported="true"

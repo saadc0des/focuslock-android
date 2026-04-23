@@ -3,24 +3,35 @@ package com.focuslock.app
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
-import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
-import android.graphics.drawable.RippleDrawable
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.view.accessibility.AccessibilityManager
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 
+/**
+ * Accessibility Service — detects foreground app changes in real time.
+ *
+ * When focus is active (FocusState.isFocusActive == true) and the detected
+ * foreground package is NOT in FocusState.allowedPackages, we show a full-screen
+ * WindowManager overlay built from plain Views (no Compose, no lifecycle issues).
+ *
+ * The overlay shows:
+ *  - A countdown timer (mirrored from FocusService via FocusState)
+ *  - A grid of allowed app shortcuts the user can tap to switch to
+ *
+ * Tapping an allowed app icon hides the overlay and launches that app.
+ */
 class FocusAccessibilityService : AccessibilityService() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -29,6 +40,7 @@ class FocusAccessibilityService : AccessibilityService() {
     private var timerLabel: TextView? = null
     private var isOverlayShowing = false
 
+    // Ticker to update the timer label every second while overlay is visible
     private val timerTicker = object : Runnable {
         override fun run() {
             if (isOverlayShowing) {
@@ -45,16 +57,16 @@ class FocusAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        instance = this
+        FocusAccessibilityService.instance = this
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        instance = null
+        FocusAccessibilityService.instance = null
         hideOverlay()
         return super.onUnbind(intent)
     }
 
-    override fun onInterrupt() {}
+    override fun onInterrupt() { /* required override */ }
 
     // -------------------------------------------------------------------------
     // Event handling
@@ -62,12 +74,19 @@ class FocusAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+
         val pkg = event.packageName?.toString() ?: return
         if (pkg.isEmpty()) return
+
+        // Ignore system UI / overlays that aren't real apps
         if (pkg == "android" || pkg == "com.android.systemui") return
 
         if (FocusState.isFocusActive) {
-            if (pkg !in FocusState.allowedPackages) showOverlay() else hideOverlay()
+            if (pkg !in FocusState.allowedPackages) {
+                showOverlay()
+            } else {
+                hideOverlay()
+            }
         } else {
             hideOverlay()
         }
@@ -80,10 +99,12 @@ class FocusAccessibilityService : AccessibilityService() {
     fun showOverlay() {
         mainHandler.post {
             if (isOverlayShowing) {
+                // Just refresh app grid in case allowed list changed
                 refreshAppGrid()
                 return@post
             }
             if (!canDrawOverlays()) return@post
+
             val wm = windowManager ?: return@post
 
             val root = buildOverlayView()
@@ -92,17 +113,16 @@ class FocusAccessibilityService : AccessibilityService() {
             val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
             else
-                @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+                @Suppress("DEPRECATION")
+                WindowManager.LayoutParams.TYPE_PHONE
 
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
                 type,
-                // FLAG_NOT_TOUCH_MODAL: lets touches through to our view (not the app below)
-                // FLAG_LAYOUT_IN_SCREEN: extends into status/nav bar areas
-                // FLAG_NOT_FOCUSABLE removed — we WANT focus so buttons are tappable
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                        WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS,
                 PixelFormat.OPAQUE
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
@@ -136,9 +156,9 @@ class FocusAccessibilityService : AccessibilityService() {
     }
 
     private fun canDrawOverlays(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             android.provider.Settings.canDrawOverlays(this)
-        else true
+        } else true
     }
 
     // -------------------------------------------------------------------------
@@ -158,16 +178,20 @@ class FocusAccessibilityService : AccessibilityService() {
             setPadding(48, 80, 48, 48)
         }
 
-        // Lock header
-        container.addView(TextView(ctx).apply {
+        // --- Lock icon area ---
+        val lockLabel = TextView(ctx).apply {
             text = "🔒 Focus Mode Active"
             textSize = 22f
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-        }, lp(bottom = 16))
+        }
+        container.addView(lockLabel, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = 16 })
 
-        // Timer
+        // --- Timer display ---
         val timerView = TextView(ctx).apply {
             text = FocusState.timerDisplay
             textSize = 54f
@@ -176,27 +200,42 @@ class FocusAccessibilityService : AccessibilityService() {
             gravity = Gravity.CENTER
         }
         timerLabel = timerView
-        container.addView(timerView, lp(bottom = 8))
+        container.addView(timerView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = 8 })
 
-        // Phase hint
-        container.addView(TextView(ctx).apply {
+        // --- Phase label ---
+        val phaseLabel = TextView(ctx).apply {
             text = "Stay focused — rest coming soon"
             textSize = 14f
             setTextColor(Color.argb(180, 255, 255, 255))
             gravity = Gravity.CENTER
-        }, lp(bottom = 48))
+        }
+        container.addView(phaseLabel, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = 48 })
 
-        // Allowed apps label
-        container.addView(TextView(ctx).apply {
+        // --- Allowed apps label ---
+        val appsLabel = TextView(ctx).apply {
             text = "Allowed Apps"
             textSize = 13f
             setTextColor(Color.argb(160, 255, 255, 255))
             gravity = Gravity.CENTER
             letterSpacing = 0.12f
-        }, lp(bottom = 24))
+        }
+        container.addView(appsLabel, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = 24 })
 
-        // App grid
-        container.addView(buildAppGrid(), lp())
+        // --- App grid ---
+        val grid = buildAppGrid()
+        container.addView(grid, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
 
         root.addView(container, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -206,142 +245,104 @@ class FocusAccessibilityService : AccessibilityService() {
         return root
     }
 
-    /**
-     * Build app grid using a vertical LinearLayout of horizontal rows (4 per row).
-     * Avoids GridLayout weight issues that cause cells to collapse.
-     */
-    private fun buildAppGrid(): LinearLayout {
+    private fun buildAppGrid(): GridLayout {
         val ctx = this
         val pm = packageManager
-        val density = resources.displayMetrics.density
-        val iconSize = (56 * density).toInt()
+        val grid = GridLayout(ctx).apply {
+            columnCount = 4
+        }
 
         val allowed = FocusState.allowedPackages
-            .filter { it != packageName }
-            .toList()
-            .take(12)
+            .filter { it != packageName } // don't show FocusLock itself
+            .take(12) // cap at 12 icons (3 rows × 4 cols)
 
-        val outerColumn = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-        }
+        for (pkg in allowed) {
+            val appIcon: Drawable? = try { pm.getApplicationIcon(pkg) } catch (e: Exception) { null }
+            val appName: String = try {
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            } catch (e: Exception) { pkg }
 
-        // Chunk into rows of 4
-        for (rowItems in allowed.chunked(4)) {
-            val row = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_HORIZONTAL
-            }
-
-            for (pkg in rowItems) {
-                val appIcon = try { pm.getApplicationIcon(pkg) } catch (e: Exception) { null }
-                val appName = try {
-                    val info = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        pm.getApplicationInfo(pkg, android.content.pm.PackageManager.ApplicationInfoFlags.of(0L))
-                    } else {
-                        @Suppress("DEPRECATION") pm.getApplicationInfo(pkg, 0)
+            val cell = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setPadding(20, 20, 20, 20)
+                isClickable = true
+                isFocusable = true
+                background = android.graphics.drawable.RippleDrawable(
+                    android.content.res.ColorStateList.valueOf(Color.argb(60, 255, 255, 255)),
+                    null, null
+                )
+                setOnClickListener {
+                    hideOverlay()
+                    val launchIntent = pm.getLaunchIntentForPackage(pkg)?.apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    pm.getApplicationLabel(info).toString()
-                } catch (e: Exception) { pkg }
-
-                val cell = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.VERTICAL
-                    gravity = Gravity.CENTER
-                    setPadding(20, 20, 20, 20)
-                    isClickable = true
-                    isFocusable = true
-                    // Bounded ripple: mask is a solid color drawable
-                    background = RippleDrawable(
-                        ColorStateList.valueOf(Color.argb(80, 255, 255, 255)),
-                        null,
-                        ColorDrawable(Color.WHITE) // mask — defines ripple boundary
-                    )
-                    setOnClickListener {
-                        hideOverlay()
-                        pm.getLaunchIntentForPackage(pkg)
-                            ?.apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) }
-                            ?.let { ctx.startActivity(it) }
+                    if (launchIntent != null) {
+                        ctx.startActivity(launchIntent)
                     }
                 }
-
-                val iconView = ImageView(ctx).apply {
-                    setImageDrawable(appIcon)
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                }
-                cell.addView(iconView, LinearLayout.LayoutParams(iconSize, iconSize).apply { bottomMargin = 8 })
-
-                cell.addView(TextView(ctx).apply {
-                    text = if (appName.length > 10) appName.take(9) + "…" else appName
-                    textSize = 11f
-                    setTextColor(Color.WHITE)
-                    gravity = Gravity.CENTER
-                    maxLines = 1
-                }, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ))
-
-                row.addView(cell, LinearLayout.LayoutParams(0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             }
 
-            // Pad incomplete rows so icons stay correctly sized
-            repeat(4 - rowItems.size) {
-                row.addView(LinearLayout(ctx), LinearLayout.LayoutParams(0,
-                    LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            val iconView = ImageView(ctx).apply {
+                setImageDrawable(appIcon)
+                scaleType = ImageView.ScaleType.FIT_CENTER
             }
+            val iconSize = (56 * resources.displayMetrics.density).toInt()
+            cell.addView(iconView, LinearLayout.LayoutParams(iconSize, iconSize).apply { bottomMargin = 8 })
 
-            outerColumn.addView(row, LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
+            val nameView = TextView(ctx).apply {
+                text = if (appName.length > 10) appName.take(9) + "…" else appName
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                maxLines = 1
+            }
+            cell.addView(nameView, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ))
+
+            grid.addView(cell, GridLayout.LayoutParams().apply {
+                width = 0
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1, 1f)
+            })
         }
 
-        return outerColumn
+        return grid
     }
 
     private fun refreshAppGrid() {
+        val root = overlayRoot ?: return
+        // Rebuild and swap the grid (find the container LinearLayout, rebuild grid at index 4)
         mainHandler.post {
             try {
-                val container = overlayRoot?.getChildAt(0) as? LinearLayout ?: return@post
+                val container = root.getChildAt(0) as? LinearLayout ?: return@post
+                // Remove old grid (last child) and add fresh one
                 val gridIndex = container.childCount - 1
                 container.removeViewAt(gridIndex)
-                container.addView(buildAppGrid(), lp())
+                container.addView(buildAppGrid(), LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ))
             } catch (e: Exception) { e.printStackTrace() }
         }
     }
-
-    private fun lp(bottom: Int = 0) = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { bottomMargin = bottom }
 
     // -------------------------------------------------------------------------
     // Companion
     // -------------------------------------------------------------------------
 
     companion object {
+        /** Nullable reference — only valid while the service is connected */
         @Volatile var instance: FocusAccessibilityService? = null
 
         fun isEnabled(ctx: android.content.Context): Boolean {
-            val am = ctx.getSystemService(android.content.Context.ACCESSIBILITY_SERVICE)
-                    as AccessibilityManager
-            val enabled = am.getEnabledAccessibilityServiceList(
-                AccessibilityServiceInfo.FEEDBACK_ALL_MASK
-            )
-            val target = "${ctx.packageName}/.FocusAccessibilityService"
-            return enabled.any { it.id?.equals(target, ignoreCase = true) == true }
-        }
-
-        fun isUsageAccessGranted(ctx: android.content.Context): Boolean {
-            val appOps = ctx.getSystemService(android.content.Context.APP_OPS_SERVICE)
-                    as android.app.AppOpsManager
-            @Suppress("DEPRECATION")
-            val mode = appOps.checkOpNoThrow(
-                android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
-                android.os.Process.myUid(),
-                ctx.packageName
-            )
-            return mode == android.app.AppOpsManager.MODE_ALLOWED
+            val enabledServices = android.provider.Settings.Secure.getString(
+                ctx.contentResolver,
+                android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: return false
+            val componentName = "${ctx.packageName}/.FocusAccessibilityService"
+            return enabledServices.split(":").any { it.equals(componentName, ignoreCase = true) }
         }
     }
 }

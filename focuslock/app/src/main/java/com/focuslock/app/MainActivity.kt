@@ -1,13 +1,12 @@
 package com.focuslock.app
 
-import android.app.AppOpsManager
+import android.app.AlertDialog
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.os.Process
 import android.provider.CalendarContract
 import android.provider.Settings
 import android.widget.Button
@@ -30,7 +29,9 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission()
     ) { checkAndRequestPermissions() }
 
+    // -------------------------------------------------------------------------
     // Views
+    // -------------------------------------------------------------------------
     private lateinit var statusText: TextView
     private lateinit var eventText: TextView
     private lateinit var accessibilityBtn: Button
@@ -45,6 +46,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Build a simple programmatic layout (no XML needed)
         val layout = android.widget.LinearLayout(this).apply {
             orientation = android.widget.LinearLayout.VERTICAL
             setPadding(48, 80, 48, 48)
@@ -58,7 +60,9 @@ class MainActivity : ComponentActivity() {
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             gravity = android.view.Gravity.CENTER
         }
-        layout.addView(title, lpOf(bottom = 32))
+        layout.addView(title, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 32 })
 
         statusText = TextView(this).apply {
             text = "Checking permissions…"
@@ -66,7 +70,9 @@ class MainActivity : ComponentActivity() {
             setTextColor(android.graphics.Color.argb(200, 255, 255, 255))
             gravity = android.view.Gravity.CENTER
         }
-        layout.addView(statusText, lpOf(bottom = 16))
+        layout.addView(statusText, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 16 })
 
         eventText = TextView(this).apply {
             text = ""
@@ -74,28 +80,30 @@ class MainActivity : ComponentActivity() {
             setTextColor(android.graphics.Color.parseColor("#BB86FC"))
             gravity = android.view.Gravity.CENTER
         }
-        layout.addView(eventText, lpOf(bottom = 32))
+        layout.addView(eventText, android.widget.LinearLayout.LayoutParams(
+            android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+            android.widget.LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 32 })
 
         accessibilityBtn = makeButton("Enable Accessibility Service") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
-        layout.addView(accessibilityBtn, lpOf(bottom = 16))
+        layout.addView(accessibilityBtn, buttonParams())
 
         overlayBtn = makeButton("Allow Overlay Permission") {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                 Uri.parse("package:$packageName")))
         }
-        layout.addView(overlayBtn, lpOf(bottom = 16))
+        layout.addView(overlayBtn, buttonParams())
 
         usageBtn = makeButton("Allow Usage Access") {
             startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
         }
-        layout.addView(usageBtn, lpOf(bottom = 16))
+        layout.addView(usageBtn, buttonParams())
 
         settingsBtn = makeButton("Allowed Apps Settings") {
             startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
         }
-        layout.addView(settingsBtn, lpOf(bottom = 16))
+        layout.addView(settingsBtn, buttonParams())
 
         setContentView(layout)
     }
@@ -103,39 +111,28 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         checkAndRequestPermissions()
-        handler.post(permissionPoller)
         handler.post(calendarPoller)
     }
 
     override fun onPause() {
         super.onPause()
-        handler.removeCallbacks(permissionPoller)
         handler.removeCallbacks(calendarPoller)
     }
 
     // -------------------------------------------------------------------------
-    // Permission polling — rechecks every 2 s while app is visible so the UI
-    // reacts immediately when the user returns from Accessibility / Usage settings
+    // Permission checks
     // -------------------------------------------------------------------------
 
-    private val permissionPoller = object : Runnable {
-        override fun run() {
-            checkAndRequestPermissions()
-            handler.postDelayed(this, 2_000L)
-        }
-    }
-
     private fun checkAndRequestPermissions() {
-        // 1. Calendar runtime permission
         val calOk = ContextCompat.checkSelfPermission(this,
             android.Manifest.permission.READ_CALENDAR) ==
                 android.content.pm.PackageManager.PERMISSION_GRANTED
+
         if (!calOk) {
             calendarPermLauncher.launch(android.Manifest.permission.READ_CALENDAR)
             return
         }
 
-        // 2. Notification permission (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val notifOk = ContextCompat.checkSelfPermission(this,
                 android.Manifest.permission.POST_NOTIFICATIONS) ==
@@ -146,56 +143,22 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // 3. Accessibility service — use AccessibilityManager (not Settings.Secure string)
-        val accessibilityOk = isAccessibilityEnabled()
-
-        // 4. Overlay permission
+        val accessibilityOk = FocusAccessibilityService.isEnabled(this)
         val overlayOk = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
             Settings.canDrawOverlays(this) else true
 
-        // 5. Usage stats — AppOpsManager (not Settings.Secure string)
-        val usageOk = isUsageAccessGranted()
+        accessibilityBtn.visibility = if (accessibilityOk)
+            android.view.View.GONE else android.view.View.VISIBLE
+        overlayBtn.visibility = if (overlayOk)
+            android.view.View.GONE else android.view.View.VISIBLE
 
-        // Update button visibility
-        accessibilityBtn.visibility = if (accessibilityOk) android.view.View.GONE else android.view.View.VISIBLE
-        overlayBtn.visibility       = if (overlayOk)       android.view.View.GONE else android.view.View.VISIBLE
-        usageBtn.visibility         = if (usageOk)         android.view.View.GONE else android.view.View.VISIBLE
-
-        val allOk = accessibilityOk && overlayOk && usageOk
-        statusText.text = when {
-            allOk -> "✓ All permissions granted — monitoring calendar"
-            else -> buildString {
-                append("⚠ Still needed: ")
-                if (!accessibilityOk) append("Accessibility  ")
-                if (!overlayOk)       append("Overlay  ")
-                if (!usageOk)         append("Usage Access  ")
-            }
-        }
-    }
-
-    private fun isAccessibilityEnabled(): Boolean {
-        val am = getSystemService(ACCESSIBILITY_SERVICE)
-                as android.view.accessibility.AccessibilityManager
-        val enabled = am.getEnabledAccessibilityServiceList(
-            android.accessibilityservice.AccessibilityServiceInfo.FEEDBACK_ALL_MASK
-        )
-        val target = "$packageName/.FocusAccessibilityService"
-        return enabled.any { it.id?.equals(target, ignoreCase = true) == true }
-    }
-
-    private fun isUsageAccessGranted(): Boolean {
-        val appOps = getSystemService(APP_OPS_SERVICE) as AppOpsManager
-        @Suppress("DEPRECATION")
-        val mode = appOps.checkOpNoThrow(
-            AppOpsManager.OPSTR_GET_USAGE_STATS,
-            Process.myUid(),
-            packageName
-        )
-        return mode == AppOpsManager.MODE_ALLOWED
+        val allOk = accessibilityOk && overlayOk
+        statusText.text = if (allOk) "✓ All permissions granted — monitoring calendar"
+        else "⚠ Grant all permissions above to enable blocking"
     }
 
     // -------------------------------------------------------------------------
-    // Calendar polling — every 30 s while app is in foreground
+    // Calendar polling (every 30 s while app is in foreground)
     // -------------------------------------------------------------------------
 
     private val calendarPoller = object : Runnable {
@@ -218,6 +181,7 @@ class MainActivity : ComponentActivity() {
         )
         val selection = "${CalendarContract.Events.DTSTART} <= ? AND ${CalendarContract.Events.DTEND} >= ?"
         val args = arrayOf(now.toString(), now.toString())
+
         try {
             contentResolver.query(
                 CalendarContract.Events.CONTENT_URI,
@@ -227,9 +191,13 @@ class MainActivity : ComponentActivity() {
                     val title = cursor.getString(0) ?: continue
                     val allDay = cursor.getInt(3) != 0
                     val endMs = cursor.getLong(2)
+
+                    // Skip all-day events (birthdays, holidays, etc.)
                     if (allDay) continue
+                    // Skip blank titles and rest-time markers
                     if (title.isBlank()) continue
                     if (title.trim().lowercase() == "rest time") continue
+
                     return CalEvent(title, endMs)
                 }
             }
@@ -256,10 +224,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startFocusService(endMs: Long) {
-        ContextCompat.startForegroundService(this,
-            Intent(this, FocusService::class.java).apply {
-                putExtra("event_end_ms", endMs)
-            })
+        val intent = Intent(this, FocusService::class.java).apply {
+            putExtra("event_end_ms", endMs)
+        }
+        ContextCompat.startForegroundService(this, intent)
     }
 
     private fun stopFocusService() {
@@ -281,8 +249,8 @@ class MainActivity : ComponentActivity() {
         setOnClickListener { onClick() }
     }
 
-    private fun lpOf(bottom: Int = 0) = android.widget.LinearLayout.LayoutParams(
+    private fun buttonParams() = android.widget.LinearLayout.LayoutParams(
         android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
         android.widget.LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { bottomMargin = bottom }
+    ).apply { bottomMargin = 16 }
 }
